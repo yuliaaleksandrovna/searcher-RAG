@@ -21,10 +21,11 @@ MAPPING = {
     },
     "mappings": {
         "properties": {
-            "title":   {"type": "text"},
-            "content": {"type": "text"},
-            "url":     {"type": "keyword"},
-            "source":  {"type": "keyword"},
+            "title":      {"type": "text"},
+            "content":    {"type": "text"},
+            "url":        {"type": "keyword"},
+            "source":     {"type": "keyword"},
+            "categories": {"type": "keyword"},
         }
     },
 }

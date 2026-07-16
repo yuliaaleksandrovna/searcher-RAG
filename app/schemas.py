@@ -8,6 +8,7 @@ class Document(BaseModel):
     url: str
     snippet: str
     score: float
+    categories: list[str] = []
 
 
 class SearchResponse(BaseModel):
@@ -15,6 +16,11 @@ class SearchResponse(BaseModel):
     total: int
     results: list[Document]
     summary: str | None = None
+
+
+class CategoryCount(BaseModel):
+    category: str
+    count: int
 
 
 class UserCredentials(BaseModel):

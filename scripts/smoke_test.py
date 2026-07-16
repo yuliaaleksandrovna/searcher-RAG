@@ -59,6 +59,24 @@ def main():
     r = requests.get(f"{base}/search", params={"q": "python"}, headers=reader_headers)
     check("GET /search with token succeeds", r.status_code == 200, r.text)
 
+    # 3b. category filter endpoint + query param
+    r = requests.get(f"{base}/categories", headers=reader_headers)
+    check("GET /categories succeeds", r.status_code == 200, r.text)
+    categories = r.json() if r.ok else []
+    if categories:
+        sample_category = categories[0]["category"]
+        r = requests.get(
+            f"{base}/search", params={"q": "a", "category": sample_category}, headers=reader_headers
+        )
+        check("GET /search with category filter succeeds", r.status_code == 200, r.text)
+        check(
+            "GET /search with category filter only returns that category",
+            r.ok and all(sample_category in doc["categories"] for doc in r.json()["results"]),
+            r.text,
+        )
+    else:
+        print("  (skipped category-filter checks: index has no categories yet)")
+
     # 4. reader cannot save
     r = requests.post(
         f"{base}/saved",

@@ -5,11 +5,15 @@ data/articles.json.
 Collects a broad set of articles (not a fixed hand-picked topic list) using
 list=allpages for title discovery + batched prop=extracts fetches, so the
 collection meets the required size (>=5000 documents) instead of the ~30
-topic-based articles used in the earlier draft.
+topic-based articles used in the earlier draft. Each article also carries
+its non-hidden Wikipedia categories (fetched in the same batched request,
+no extra round-trips) for the /search?category=... filter, and exact
+content duplicates (e.g. near-identical stub pages) are skipped.
 
 Usage: python scripts/parser.py
 """
 
+import hashlib
 import json
 import os
 import time
@@ -21,7 +25,8 @@ HEADERS = {
 }
 
 # Discover more titles than the 5000 target, since some fraction of pages
-# (stubs, list pages, disambiguation-like pages) get filtered out below.
+# (stubs, list pages, disambiguation-like pages, exact-content duplicates)
+# get filtered out below.
 DISCOVER_TARGET = 7000
 MIN_FINAL_DOCS = 5000
 
@@ -29,6 +34,7 @@ TITLE_BATCH = 500     # max page titles per list=allpages request
 EXTRACT_BATCH = 20    # max titles per prop=extracts request for anonymous API access
 MIN_CONTENT_LENGTH = 200
 MAX_CONTENT_LENGTH = 4000
+MAX_CATEGORIES = 5    # categories stored per article, for search filtering
 
 SAVE_EVERY_N_BATCHES = 25  # checkpoint to disk periodically (~500 titles) so an
                            # interruption doesn't lose everything collected so far
@@ -86,15 +92,21 @@ def discover_titles(target: int) -> list[str]:
     return titles[:target]
 
 
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def fetch_batch(titles: list[str]) -> list[dict]:
-    """Fetch extracts + canonical URLs for up to EXTRACT_BATCH titles at once."""
+    """Fetch extracts + URLs + categories for up to EXTRACT_BATCH titles at once."""
     params = {
         "action": "query",
         "titles": "|".join(titles),
-        "prop": "extracts|info",
+        "prop": "extracts|info|categories",
         "explaintext": True,
         "inprop": "url",
         "redirects": 1,
+        "cllimit": "max",
+        "clshow": "!hidden",  # skip maintenance/tracking categories (e.g. "CS1 errors")
     }
     data = _get(params)
     if data is None:
@@ -109,11 +121,15 @@ def fetch_batch(titles: list[str]) -> list[dict]:
         if len(content) < MIN_CONTENT_LENGTH:
             continue
         title = page.get("title", "")
+        categories = [
+            c["title"].split(":", 1)[-1] for c in page.get("categories", [])
+        ][:MAX_CATEGORIES]
         docs.append({
             "title": title,
             "url": page.get("fullurl", f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"),
             "content": content[:MAX_CONTENT_LENGTH],
             "source": "Wikipedia",
+            "categories": categories,
         })
     return docs
 
@@ -130,15 +146,23 @@ def main():
     print(f"Discovered {len(titles)} titles. Fetching extracts in batches of {EXTRACT_BATCH}...\n")
 
     articles = []
+    seen_hashes = set()
+    duplicates_skipped = 0
     batch_num = 0
     for i in range(0, len(titles), EXTRACT_BATCH):
         batch_num += 1
         batch = titles[i:i + EXTRACT_BATCH]
-        docs = fetch_batch(batch)
-        articles.extend(docs)
+        for doc in fetch_batch(batch):
+            content_hash = _content_hash(doc["content"])
+            if content_hash in seen_hashes:
+                duplicates_skipped += 1
+                continue
+            seen_hashes.add(content_hash)
+            articles.append(doc)
 
         done = i + len(batch)
-        print(f"[{done}/{len(titles)} titles processed] collected {len(articles)} documents")
+        print(f"[{done}/{len(titles)} titles processed] collected {len(articles)} documents "
+              f"({duplicates_skipped} duplicates skipped)")
 
         if batch_num % SAVE_EVERY_N_BATCHES == 0:
             save(articles)
@@ -146,7 +170,8 @@ def main():
         time.sleep(0.4)
 
     save(articles)
-    print(f"\nDone: {len(articles)} articles saved to {OUTPUT_PATH}")
+    print(f"\nDone: {len(articles)} articles saved to {OUTPUT_PATH} "
+          f"({duplicates_skipped} exact-content duplicates skipped)")
 
     if len(articles) < MIN_FINAL_DOCS:
         print(

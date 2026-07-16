@@ -11,7 +11,7 @@ from app.summarizer import summarize as make_summary
 from app.db import Base, engine, get_db
 from app.models import Role, User, SearchLog, seed_roles, ROLE_READER
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
-from app.schemas import Document, SearchResponse, UserCredentials, TokenResponse, MeResponse
+from app.schemas import Document, SearchResponse, UserCredentials, TokenResponse, MeResponse, CategoryCount
 from app.routers import history, saved, admin
 
 load_dotenv()
@@ -88,27 +88,51 @@ def me(user: User = Depends(get_current_user)):
     return MeResponse(id=user.id, username=user.username, role=user.role.name)
 
 
+@app.get("/categories", response_model=list[CategoryCount], tags=["search"])
+def list_categories(user: User = Depends(get_current_user)):
+    """Distinct Wikipedia categories present in the index, for the search filter dropdown."""
+    if not es.ping():
+        raise HTTPException(status_code=503, detail="Elasticsearch is unavailable")
+
+    resp = es.search(
+        index=INDEX,
+        size=0,
+        aggs={"categories": {"terms": {"field": "categories", "size": 50}}},
+    )
+    buckets = resp["aggregations"]["categories"]["buckets"]
+    return [CategoryCount(category=b["key"], count=b["doc_count"]) for b in buckets]
+
+
 @app.get("/search", response_model=SearchResponse, tags=["search"])
 def search(
     q: str = Query(..., min_length=1, description="Search query"),
     top_k: int = Query(5, ge=1, le=20, description="Number of results"),
     with_summary: bool = Query(False, description="Summarize results with LLM"),
+    category: str | None = Query(None, description="Filter results to this Wikipedia category"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if not es.ping():
         raise HTTPException(status_code=503, detail="Elasticsearch is unavailable")
 
+    query_clause = {
+        "bool": {
+            "must": {
+                "multi_match": {
+                    "query": q,
+                    "fields": ["title^3", "content"],
+                    "type": "best_fields",
+                    "fuzziness": "AUTO",
+                }
+            }
+        }
+    }
+    if category:
+        query_clause["bool"]["filter"] = {"term": {"categories": category}}
+
     resp = es.search(
         index=INDEX,
-        query={
-            "multi_match": {
-                "query": q,
-                "fields": ["title^3", "content"],
-                "type": "best_fields",
-                "fuzziness": "AUTO",
-            }
-        },
+        query=query_clause,
         highlight={
             "fields": {
                 "content": {
@@ -137,6 +161,7 @@ def search(
             url=src["url"],
             snippet=snippet,
             score=round(h["_score"], 4),
+            categories=src.get("categories", []),
         ))
 
     db.add(SearchLog(user_id=user.id, query=q, results_count=total))

@@ -409,6 +409,12 @@
             <option value="10">10</option>
           </select>
         </label>
+        <label>
+          Категория:
+          <select id="categoryFilter">
+            <option value="">Все категории</option>
+          </select>
+        </label>
       </div>
     </div>
     <div id="status"></div>
@@ -511,6 +517,20 @@
     document.getElementById('userInfo').textContent = `${currentUser.username} (${currentUser.role})`;
     document.getElementById('adminTabBtn').style.display = currentUser.role === 'owner' ? 'inline-block' : 'none';
     showPage('search');
+    loadCategories();
+  }
+
+  async function loadCategories() {
+    const select = document.getElementById('categoryFilter');
+    try {
+      const categories = await api('/categories');
+      const options = categories
+        .map(c => `<option value="${escHtml(c.category)}">${escHtml(c.category)} (${c.count})</option>`)
+        .join('');
+      select.innerHTML = `<option value="">Все категории</option>${options}`;
+    } catch (e) {
+      // Filter dropdown is a nice-to-have; leave it at "Все категории" on failure.
+    }
   }
 
   function showPage(name) {
@@ -535,6 +555,7 @@
     const results = document.getElementById('results');
     const topK = document.getElementById('topK').value;
     const withSummary = document.getElementById('withSummary').checked;
+    const category = document.getElementById('categoryFilter').value;
 
     btn.disabled = true;
     btn.textContent = 'Ищу...';
@@ -543,6 +564,7 @@
 
     try {
       const params = new URLSearchParams({ q, top_k: topK, with_summary: withSummary });
+      if (category) params.set('category', category);
       const data = await api(`/search?${params}`);
       status.textContent = `Найдено ${data.total} документов`;
       renderResults(data);
@@ -574,6 +596,9 @@
     }
 
     data.results.forEach((r, i) => {
+      const tags = (r.categories || [])
+        .map(c => `<span class="score">${escHtml(c)}</span>`)
+        .join(' ');
       html += `
         <div class="result-card">
           <div class="meta">
@@ -582,6 +607,7 @@
           </div>
           <div class="source">${escHtml(r.url)}</div>
           <p>${escHtml(r.snippet)}</p>
+          ${tags ? `<div style="margin-bottom:10px">${tags}</div>` : ''}
           ${canSave ? `<button class="save-btn" id="save-${i}" onclick="saveArticle('${escHtml(r.url).replace(/'/g, "\\'")}', '${escHtml(r.title).replace(/'/g, "\\'")}', ${i})">Сохранить</button>` : ''}
         </div>`;
     });
