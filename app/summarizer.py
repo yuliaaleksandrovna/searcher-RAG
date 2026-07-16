@@ -18,9 +18,12 @@ def _with_claude(query: str, context: str, api_key: str) -> str:
             messages=[{
                 "role": "user",
                 "content": (
-                    f"You are a helpful assistant. Based on the search results below, "
-                    f"write a concise answer to the query: '{query}'\n\n"
+                    f"You are a helpful assistant. Answer the query strictly using the "
+                    f"search results below — do not use outside knowledge and do not "
+                    f"guess. If the results don't contain enough information to answer, "
+                    f"say so explicitly instead of making something up.\n\n"
                     f"Search results:\n{context}\n\n"
+                    f"Query: '{query}'\n\n"
                     f"Answer in 2-4 sentences."
                 ),
             }],

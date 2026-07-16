@@ -1,5 +1,12 @@
 """
-Parses articles from Wikipedia API and saves them to data/articles.json.
+Parses articles from Wikipedia via the MediaWiki API and saves them to
+data/articles.json.
+
+Collects a broad set of articles (not a fixed hand-picked topic list) using
+list=allpages for title discovery + batched prop=extracts fetches, so the
+collection meets the required size (>=5000 documents) instead of the ~30
+topic-based articles used in the earlier draft.
+
 Usage: python scripts/parser.py
 """
 
@@ -8,100 +15,145 @@ import os
 import time
 import requests
 
-TOPICS = [
-    "Python_(programming_language)",
-    "JavaScript",
-    "Go_(programming_language)",
-    "Rust_(programming_language)",
-    "Machine_learning",
-    "Deep_learning",
-    "Neural_network",
-    "Transformer_(machine_learning_model)",
-    "Docker_(software)",
-    "Kubernetes",
-    "Representational_state_transfer",
-    "GraphQL",
-    "PostgreSQL",
-    "MongoDB",
-    "Redis",
-    "Elasticsearch",
-    "FastAPI",
-    "Django_(web_framework)",
-    "React_(software)",
-    "Git",
-    "Linux",
-    "Microservices",
-    "DevOps",
-    "Algorithm",
-    "Data_structure",
-    "Artificial_intelligence",
-    "Natural_language_processing",
-    "Computer_vision",
-    "Cloud_computing",
-    "Application_programming_interface",
-]
-
-
+API_URL = "https://en.wikipedia.org/w/api.php"
 HEADERS = {
     "User-Agent": "SearcherMVP/1.0 (educational project; python-requests)"
 }
 
+# Discover more titles than the 5000 target, since some fraction of pages
+# (stubs, list pages, disambiguation-like pages) get filtered out below.
+DISCOVER_TARGET = 7000
+MIN_FINAL_DOCS = 5000
 
-def fetch_article(title: str) -> dict | None:
-    url = "https://en.wikipedia.org/w/api.php"
-    params = {
-        "action": "query",
-        "titles": title,
-        "prop": "extracts|info",
-        "explaintext": True,
-        "inprop": "url",
-        "format": "json",
-        "redirects": 1,
-    }
-    for attempt in range(4):
+TITLE_BATCH = 500     # max page titles per list=allpages request
+EXTRACT_BATCH = 20    # max titles per prop=extracts request for anonymous API access
+MIN_CONTENT_LENGTH = 200
+MAX_CONTENT_LENGTH = 4000
+
+SAVE_EVERY_N_BATCHES = 25  # checkpoint to disk periodically (~500 titles) so an
+                           # interruption doesn't lose everything collected so far
+OUTPUT_PATH = "data/articles.json"
+
+
+def _get(params: dict, max_retries: int = 4) -> dict | None:
+    params = {**params, "format": "json"}
+    for attempt in range(max_retries):
         try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=20)
             if resp.status_code == 429:
                 wait = 15 * (2 ** attempt)
                 print(f"  Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
-            pages = resp.json()["query"]["pages"]
-            page = next(iter(pages.values()))
-            if "missing" in page or "extract" not in page or not page["extract"].strip():
-                return None
-            return {
-                "title": page.get("title", title),
-                "url": page.get("fullurl", f"https://en.wikipedia.org/wiki/{title}"),
-                "content": page["extract"].strip()[:8000],
-                "source": "Wikipedia",
-            }
-        except Exception as e:
+            return resp.json()
+        except requests.RequestException as e:
             print(f"  Error (attempt {attempt + 1}): {e}")
             time.sleep(5)
     return None
 
 
-def main():
+def discover_titles(target: int) -> list[str]:
+    """Page through list=allpages to gather non-redirect article titles."""
+    titles = []
+    apcontinue = None
+
+    while len(titles) < target:
+        params = {
+            "action": "query",
+            "list": "allpages",
+            "apnamespace": 0,
+            "apfilterredir": "nonredirects",
+            "aplimit": TITLE_BATCH,
+        }
+        if apcontinue:
+            params["apcontinue"] = apcontinue
+
+        data = _get(params)
+        if data is None:
+            print("  Could not fetch a page of titles, stopping discovery early.")
+            break
+
+        pages = data.get("query", {}).get("allpages", [])
+        titles.extend(p["title"] for p in pages)
+        print(f"  Discovered {len(titles)} candidate titles so far...")
+
+        apcontinue = data.get("continue", {}).get("apcontinue")
+        if not apcontinue:
+            break
+        time.sleep(0.3)
+
+    return titles[:target]
+
+
+def fetch_batch(titles: list[str]) -> list[dict]:
+    """Fetch extracts + canonical URLs for up to EXTRACT_BATCH titles at once."""
+    params = {
+        "action": "query",
+        "titles": "|".join(titles),
+        "prop": "extracts|info",
+        "explaintext": True,
+        "inprop": "url",
+        "redirects": 1,
+    }
+    data = _get(params)
+    if data is None:
+        return []
+
+    pages = data.get("query", {}).get("pages", {})
+    docs = []
+    for page in pages.values():
+        if "missing" in page or "extract" not in page:
+            continue
+        content = page["extract"].strip()
+        if len(content) < MIN_CONTENT_LENGTH:
+            continue
+        title = page.get("title", "")
+        docs.append({
+            "title": title,
+            "url": page.get("fullurl", f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"),
+            "content": content[:MAX_CONTENT_LENGTH],
+            "source": "Wikipedia",
+        })
+    return docs
+
+
+def save(articles: list[dict]) -> None:
     os.makedirs("data", exist_ok=True)
-    articles = []
-
-    for i, topic in enumerate(TOPICS):
-        print(f"[{i+1}/{len(TOPICS)}] {topic}")
-        article = fetch_article(topic)
-        if article:
-            articles.append(article)
-            print(f"  OK — {article['title']} ({len(article['content'])} chars)")
-        else:
-            print(f"  Skipped")
-        time.sleep(2)
-
-    output = "data/articles.json"
-    with open(output, "w", encoding="utf-8") as f:
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(articles, f, ensure_ascii=False, indent=2)
 
-    print(f"\nDone: {len(articles)} articles saved to {output}")
+
+def main():
+    print(f"Discovering at least {DISCOVER_TARGET} candidate titles...")
+    titles = discover_titles(DISCOVER_TARGET)
+    print(f"Discovered {len(titles)} titles. Fetching extracts in batches of {EXTRACT_BATCH}...\n")
+
+    articles = []
+    batch_num = 0
+    for i in range(0, len(titles), EXTRACT_BATCH):
+        batch_num += 1
+        batch = titles[i:i + EXTRACT_BATCH]
+        docs = fetch_batch(batch)
+        articles.extend(docs)
+
+        done = i + len(batch)
+        print(f"[{done}/{len(titles)} titles processed] collected {len(articles)} documents")
+
+        if batch_num % SAVE_EVERY_N_BATCHES == 0:
+            save(articles)
+
+        time.sleep(0.4)
+
+    save(articles)
+    print(f"\nDone: {len(articles)} articles saved to {OUTPUT_PATH}")
+
+    if len(articles) < MIN_FINAL_DOCS:
+        print(
+            f"WARNING: only {len(articles)} documents collected, below the "
+            f"required {MIN_FINAL_DOCS}. Increase DISCOVER_TARGET in this "
+            f"script and rerun."
+        )
 
 
 if __name__ == "__main__":
